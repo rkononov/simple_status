@@ -11,6 +11,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
 	"time"
 )
 
@@ -21,23 +22,78 @@ var (
 )
 
 type Message struct {
-	Host string
-	Load string
-	Rams string
-	Time string
+	Host     string
+	Load     string
+	Rams     string
+	Time     string
+	Tasklist string
 }
 
 func init() {
 	flag.BoolVar(&tls, "ssl", false, "TLS boolean flag")
 	flag.Parse()
 }
+func Pipeline(cmds ...*exec.Cmd) (pipeLineOutput, collectedStandardError []byte, pipeLineError error) {
+	// Require at least one command
+	if len(cmds) < 1 {
+		return nil, nil, nil
+	}
 
+	// Collect the output from the command(s)
+	var output bytes.Buffer
+	var stderr bytes.Buffer
+
+	last := len(cmds) - 1
+	for i, cmd := range cmds[:last] {
+		var err error
+		// Connect each command's stdin to the previous command's stdout
+		if cmds[i+1].Stdin, err = cmd.StdoutPipe(); err != nil {
+			return nil, nil, err
+		}
+		// Connect each command's stderr to a buffer
+		cmd.Stderr = &stderr
+	}
+
+	// Connect the output and error for the last command
+	cmds[last].Stdout, cmds[last].Stderr = &output, &stderr
+
+	// Start each command
+	for _, cmd := range cmds {
+		if err := cmd.Start(); err != nil {
+			return output.Bytes(), stderr.Bytes(), err
+		}
+	}
+
+	// Wait for each command to complete
+	for _, cmd := range cmds {
+		if err := cmd.Wait(); err != nil {
+			return output.Bytes(), stderr.Bytes(), err
+		}
+	}
+
+	// Return the pipeline output and the collected standard error
+	return output.Bytes(), stderr.Bytes(), nil
+}
 func host() string {
 	host, err := os.Hostname()
 	if err != nil {
 		return fmt.Sprint(err)
 	}
 	return host
+}
+
+func tasklist() string {
+	psax := exec.Command("ps", "ax")
+	grep := exec.Command("grep", " 'su nobody'")
+	// Run the pipeline
+	tasklist, stderr, err := Pipeline(psax, grep)
+	if err != nil {
+		return fmt.Sprint(err)
+	}
+	if len(stderr) > 0 {
+		log.Printf("stderr\n%s", stderr)
+	}
+	return fmt.Sprintf("%s", tasklist[:len(tasklist)-1])
 }
 
 func load() string {
@@ -81,7 +137,7 @@ func now() string {
 }
 
 func message() []byte {
-	m := Message{host(), load(), ram(), now()}
+	m := Message{host(), load(), ram(), now(), tasklist()}
 	b, err := json.Marshal(m)
 	if err != nil {
 		return nil
